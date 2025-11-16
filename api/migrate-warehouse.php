@@ -1,0 +1,143 @@
+<?php
+header("Access-Control-Allow-Origin: *");
+header("Content-Type: application/json; charset=UTF-8");
+
+include_once 'config/database.php';
+
+$database = new Database();
+$db = $database->getConnection();
+
+try {
+    $db->beginTransaction();
+
+    // Create warehouse_stock table
+    $db->exec("CREATE TABLE IF NOT EXISTS warehouse_stock (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        spare_id INT NOT NULL,
+        total_quantity INT NOT NULL DEFAULT 0,
+        available_quantity INT NOT NULL DEFAULT 0,
+        issued_quantity INT NOT NULL DEFAULT 0,
+        consumed_quantity INT NOT NULL DEFAULT 0,
+        returned_quantity INT NOT NULL DEFAULT 0,
+        minimum_stock_level INT DEFAULT 10,
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (spare_id) REFERENCES spares(id) ON DELETE CASCADE,
+        UNIQUE KEY unique_spare_stock (spare_id)
+    )");
+
+    // Create spare_inventory table
+    $db->exec("CREATE TABLE IF NOT EXISTS spare_inventory (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        spare_id INT NOT NULL,
+        unique_spare_id VARCHAR(50) UNIQUE NOT NULL,
+        status ENUM('available', 'issued', 'consumed', 'returned') DEFAULT 'available',
+        technician_id INT NULL,
+        service_report_id INT NULL,
+        batch_number VARCHAR(50) NULL,
+        manufacture_date DATE NULL,
+        expiry_date DATE NULL,
+        cost_price DECIMAL(10, 2) DEFAULT 0.00,
+        selling_price DECIMAL(10, 2) DEFAULT 0.00,
+        location_in_warehouse VARCHAR(100) NULL,
+        notes TEXT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (spare_id) REFERENCES spares(id) ON DELETE CASCADE,
+        FOREIGN KEY (technician_id) REFERENCES users(id) ON DELETE SET NULL,
+        FOREIGN KEY (service_report_id) REFERENCES service_reports(id) ON DELETE SET NULL
+    )");
+
+    // Create spare_transactions table
+    $db->exec("CREATE TABLE IF NOT EXISTS spare_transactions (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        spare_inventory_id INT NOT NULL,
+        transaction_type ENUM('stock_in', 'issued', 'consumed', 'returned', 'damaged', 'lost') NOT NULL,
+        technician_id INT NULL,
+        service_report_id INT NULL,
+        quantity INT DEFAULT 1,
+        previous_status ENUM('available', 'issued', 'consumed', 'returned') NULL,
+        new_status ENUM('available', 'issued', 'consumed', 'returned') NOT NULL,
+        transaction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        notes TEXT NULL,
+        created_by INT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (spare_inventory_id) REFERENCES spare_inventory(id) ON DELETE CASCADE,
+        FOREIGN KEY (technician_id) REFERENCES users(id) ON DELETE SET NULL,
+        FOREIGN KEY (service_report_id) REFERENCES service_reports(id) ON DELETE SET NULL,
+        FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
+    )");
+
+    // Create technician_spare_assignments table
+    $db->exec("CREATE TABLE IF NOT EXISTS technician_spare_assignments (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        technician_id INT NOT NULL,
+        spare_inventory_id INT NOT NULL,
+        assigned_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expected_return_date DATE NULL,
+        purpose TEXT NULL,
+        status ENUM('active', 'completed', 'overdue') DEFAULT 'active',
+        assigned_by INT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (technician_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (spare_inventory_id) REFERENCES spare_inventory(id) ON DELETE CASCADE,
+        FOREIGN KEY (assigned_by) REFERENCES users(id) ON DELETE CASCADE,
+        UNIQUE KEY unique_assignment (technician_id, spare_inventory_id)
+    )");
+
+    // Update service_spares table if not exists
+    $db->exec("ALTER TABLE service_spares ADD COLUMN IF NOT EXISTS spare_inventory_id INT NULL");
+    $db->exec("ALTER TABLE service_spares ADD COLUMN IF NOT EXISTS unique_spare_id VARCHAR(50) NULL");
+    $db->exec("ALTER TABLE service_spares ADD COLUMN IF NOT EXISTS status ENUM('consumed', 'returned') DEFAULT 'consumed'");
+    $db->exec("ALTER TABLE service_spares ADD FOREIGN KEY IF NOT EXISTS (spare_inventory_id) REFERENCES spare_inventory(id) ON DELETE SET NULL");
+
+    // Create indexes
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_spare_inventory_spare_id ON spare_inventory(spare_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_spare_inventory_status ON spare_inventory(status)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_spare_inventory_technician ON spare_inventory(technician_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_spare_inventory_unique_id ON spare_inventory(unique_spare_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_spare_transactions_inventory ON spare_transactions(spare_inventory_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_spare_transactions_type ON spare_transactions(transaction_type)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_spare_transactions_technician ON spare_transactions(technician_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_technician_assignments_tech ON technician_spare_assignments(technician_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_technician_assignments_status ON technician_spare_assignments(status)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_warehouse_stock_spare ON warehouse_stock(spare_id)");
+
+    // Initialize warehouse stock from existing spares
+    $db->exec("INSERT IGNORE INTO warehouse_stock (spare_id, total_quantity, available_quantity)
+               SELECT id, stock_qty, stock_qty FROM spares WHERE stock_qty > 0");
+
+    // Generate initial spare inventory
+    $db->exec("INSERT IGNORE INTO spare_inventory (spare_id, unique_spare_id, status, cost_price, selling_price)
+               SELECT
+                   s.id,
+                   CONCAT(
+                       UPPER(LEFT(s.name, 2)),
+                       '-',
+                       YEAR(CURDATE()),
+                       '-',
+                       LPAD((SELECT COUNT(*) + 1 FROM spare_inventory si WHERE si.spare_id = s.id), 4, '0')
+                   ) as unique_spare_id,
+                   'available',
+                   s.price * 0.7,
+                   s.price
+               FROM spares s
+               WHERE s.stock_qty > 0
+               AND NOT EXISTS (SELECT 1 FROM spare_inventory si WHERE si.spare_id = s.id)");
+
+    $db->commit();
+
+    echo json_encode(array(
+        "success" => true,
+        "message" => "Warehouse tables created and initialized successfully"
+    ));
+
+} catch (Exception $e) {
+    $db->rollBack();
+    http_response_code(500);
+    echo json_encode(array(
+        "success" => false,
+        "error" => "Migration failed: " . $e->getMessage()
+    ));
+}
+?>

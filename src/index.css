@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Mobile-optimized signature canvas styles */
+@layer components {
+  .signature-canvas.touch-optimized {
+    /* Improve touch responsiveness */
+    touch-action: none;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* Prevent zoom on double tap for iOS */
+  .signature-canvas.touch-optimized {
+    touch-action: manipulation;
+  }
+
+  /* Better touch targets for mobile */
+  @media (max-width: 768px) {
+    .signature-canvas.touch-optimized {
+      /* Increase line width for better visibility on mobile */
+      stroke-width: 3;
+    }
+
+    /* Ensure buttons are large enough for touch */
+    .min-h-\[48px\] {
+      min-height: 48px;
+    }
+  }
+}
